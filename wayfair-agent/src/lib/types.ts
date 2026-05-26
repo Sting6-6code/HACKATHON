@@ -14,6 +14,33 @@ export type ReasoningNode = {
   duration_ms?: number;
 };
 
+export type RoomProfile = {
+  room_type: string;
+  dimensions: {
+    label: string;
+    width_ft?: number;
+    length_ft?: number;
+    source: 'user' | 'assumed';
+  };
+  style: string[];
+  budget?: number;
+  needs: string[];
+  constraints: string[];
+};
+
+export type LayoutItem = {
+  id: string;
+  label: string;
+  category: string;
+  price?: string;
+  left: string;
+  top: string;
+  width: string;
+  height: string;
+};
+
+export type AgentSource = 'mock' | 'fallback' | 'live';
+
 export type AgentAnswer = {
   products: Product[];
   summary: string;
@@ -22,18 +49,26 @@ export type AgentAnswer = {
 
 export type RunRecord = {
   runId: string;
+  userRequest: string;
+  roomProfile: RoomProfile;
   products: Product[];
   reasoning: ReasoningNode[];
   summary: string;
   total_estimated: string;
+  layout: LayoutItem[];
+  source?: AgentSource;
   createdAt: string;
 };
 
 export type AgentSuccessResponse = {
   runId: string;
+  roomProfile: RoomProfile;
   products: Product[];
   summary: string;
   total_estimated: string;
+  reasoning: ReasoningNode[];
+  layout: LayoutItem[];
+  source?: AgentSource;
 };
 
 export type AgentErrorResponse = {

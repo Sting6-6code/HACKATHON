@@ -1,9 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { ReasoningTask } from 'subconscious';
+import { extractRoomProfile, FALLBACK_ROOM_PROFILE } from '@/lib/baseten';
+import { buildLayout } from '@/lib/layout';
 import { getSubconscious, AGENT_ENGINE, WAYFAIR_TOOLS } from '@/lib/subconscious';
 import { WAYFAIR_AGENT_PROMPT } from '@/lib/prompts';
 import { saveRun } from '@/lib/store';
-import type { AgentAnswer, Product, ReasoningNode } from '@/lib/types';
+import type {
+  AgentAnswer,
+  AgentSource,
+  AgentSuccessResponse,
+  Product,
+  ReasoningNode,
+  RoomProfile,
+} from '@/lib/types';
 
 function flattenReasoning(tasks: ReasoningTask[] | undefined): ReasoningNode[] {
   if (!tasks) return [];
@@ -28,45 +37,155 @@ function flattenReasoning(tasks: ReasoningTask[] | undefined): ReasoningNode[] {
   return out;
 }
 
-function parseAnswer(raw: string): AgentAnswer | null {
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+function parseJsonObject(raw: string): unknown | null {
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  const jsonText = start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+
   try {
-    const p = JSON.parse(cleaned);
-    return Array.isArray(p?.products) ? (p as AgentAnswer) : null;
+    return JSON.parse(jsonText);
   } catch {
     return null;
   }
 }
 
-const PLACEHOLDER = (label: string) => `https://via.placeholder.com/400x300?text=${encodeURIComponent(label)}`;
+function parseAnswer(raw: string): AgentAnswer | null {
+  const parsed = parseJsonObject(raw);
+  if (!parsed || typeof parsed !== 'object') return null;
+  const answer = parsed as Partial<AgentAnswer>;
+  return Array.isArray(answer.products) &&
+    typeof answer.summary === 'string' &&
+    typeof answer.total_estimated === 'string'
+    ? (answer as AgentAnswer)
+    : null;
+}
+
+function buildSuccessResponse({
+  runId,
+  userRequest,
+  roomProfile,
+  products,
+  reasoning,
+  summary,
+  total_estimated,
+  source,
+}: {
+  runId: string;
+  userRequest: string;
+  roomProfile: RoomProfile;
+  products: Product[];
+  reasoning: ReasoningNode[];
+  summary: string;
+  total_estimated: string;
+  source: AgentSource;
+}): AgentSuccessResponse {
+  const layout = buildLayout(products);
+
+  saveRun(runId, {
+    userRequest,
+    roomProfile,
+    products,
+    reasoning,
+    summary,
+    total_estimated,
+    layout,
+    source,
+  });
+
+  return {
+    runId,
+    roomProfile,
+    products,
+    summary,
+    total_estimated,
+    reasoning,
+    layout,
+    source,
+  };
+}
+
 const MOCK_PRODUCTS: Product[] = [
-  { name: 'Hagen Solid Wood Platform Bed', price: '$329', why_it_fits: 'Light oak finish and clean lines anchor the Scandinavian palette without crowding a studio.', image_url: PLACEHOLDER('Platform Bed'), product_url: 'https://www.wayfair.com/furniture/pdp/example-bed.html' },
-  { name: 'Mercer Round Side Table', price: '$89', why_it_fits: 'Compact 18" footprint slots next to the bed and echoes the warm wood tones.', image_url: PLACEHOLDER('Side Table'), product_url: 'https://www.wayfair.com/furniture/pdp/example-table.html' },
-  { name: 'Ellis Linen Accent Chair', price: '$249', why_it_fits: 'Cream upholstery and tapered legs keep the room feeling airy and under budget.', image_url: PLACEHOLDER('Accent Chair'), product_url: 'https://www.wayfair.com/furniture/pdp/example-chair.html' },
+  {
+    name: 'Hagen Solid Wood Platform Bed',
+    price: '$329',
+    why_it_fits: 'A low-profile light wood frame anchors the sleeping area without making the studio feel crowded.',
+    image_url: 'https://images.unsplash.com/photo-1505693416388-ac5ce068fe85?auto=format&fit=crop&w=900&q=80',
+    product_url: 'https://www.wayfair.com/',
+  },
+  {
+    name: 'Alden Compact Writing Desk',
+    price: '$158',
+    why_it_fits: 'The slim desktop creates a real work zone while leaving walkway space open near the foot of the bed.',
+    image_url: 'https://images.unsplash.com/photo-1518455027359-f3f8164ba6bd?auto=format&fit=crop&w=900&q=80',
+    product_url: 'https://www.wayfair.com/',
+  },
+  {
+    name: 'Briar Two-Door Storage Cabinet',
+    price: '$139',
+    why_it_fits: 'Closed storage hides everyday clutter and doubles as a landing surface in a small apartment.',
+    image_url: 'https://images.unsplash.com/photo-1555041469-a586c61ea9bc?auto=format&fit=crop&w=900&q=80',
+    product_url: 'https://www.wayfair.com/',
+  },
+  {
+    name: 'Nora Upholstered Desk Chair',
+    price: '$92',
+    why_it_fits: 'A soft neutral seat keeps the work corner comfortable and visually connected to the cozy palette.',
+    image_url: 'https://images.unsplash.com/photo-1503602642458-232111445657?auto=format&fit=crop&w=900&q=80',
+    product_url: 'https://www.wayfair.com/',
+  },
+  {
+    name: 'Mila Washable Area Rug',
+    price: '$58',
+    why_it_fits: 'The rug visually separates the bed and work zones while adding warmth without blowing the budget.',
+    image_url: 'https://images.unsplash.com/photo-1501045661006-fcebe0257c3f?auto=format&fit=crop&w=900&q=80',
+    product_url: 'https://www.wayfair.com/',
+  },
 ];
 const MOCK_REASONING: ReasoningNode[] = [
-  { step: 1, type: 'thought', content: 'Scandinavian studio, $800 budget. Need bed, side table, accent seating.' },
-  { step: 2, type: 'tool_call', tool: 'fast_search', content: '{"query":"scandinavian platform bed wayfair"}', duration_ms: 1240 },
-  { step: 3, type: 'observation', content: 'Top hit: Hagen platform bed, light oak, $329 — fits the brief.' },
-  { step: 4, type: 'tool_call', tool: 'fast_search', content: '{"query":"round wood side table site:wayfair.com"}', duration_ms: 980 },
-  { step: 5, type: 'thought', content: 'Subtotal $667. Within budget. Finalizing the set.' },
+  { step: 1, type: 'thought', content: 'The user needs a first-apartment studio plan, so prioritize multi-zone function over decorative extras.' },
+  { step: 2, type: 'tool_call', tool: 'fast_search', content: '{"query":"Wayfair light wood platform bed small studio"}', duration_ms: 940 },
+  { step: 3, type: 'observation', content: 'A low platform bed gives the room a visual anchor and keeps sight lines open.' },
+  { step: 4, type: 'tool_call', tool: 'fast_search', content: '{"query":"compact writing desk storage cabinet Wayfair"}', duration_ms: 1120 },
+  { step: 5, type: 'thought', content: 'The bed, desk, storage, chair, and rug total $776, leaving a small buffer under the $800 target.' },
+  { step: 6, type: 'observation', content: 'The layout keeps the bed, work surface, and storage in separate zones so the studio feels usable.' },
 ];
-const MOCK_SUMMARY = 'A warm, light-wood Scandinavian studio: oak platform bed, a compact round side table, and a cream linen chair tie the palette together.';
+const MOCK_SUMMARY = 'A compact studio plan with light wood anchor pieces, closed storage, a dedicated work corner, and soft neutral texture while staying under budget.';
+const MOCK_TOTAL = '$776';
 
 export async function POST(req: NextRequest) {
+  const runId = crypto.randomUUID();
+  let userRequest = '';
+  let roomProfile = FALLBACK_ROOM_PROFILE;
+
   try {
-    const { userRequest } = (await req.json()) as { userRequest?: string };
-    if (!userRequest?.trim()) return NextResponse.json({ error: 'userRequest is required' }, { status: 400 });
-    const runId = crypto.randomUUID();
+    const body = (await req.json()) as { userRequest?: string };
+    userRequest = body.userRequest?.trim() ?? '';
+    if (!userRequest) return NextResponse.json({ error: 'userRequest is required' }, { status: 400 });
+
+    roomProfile = await extractRoomProfile(userRequest);
 
     if (process.env.USE_MOCK === 'true') {
-      saveRun(runId, { products: MOCK_PRODUCTS, reasoning: MOCK_REASONING, summary: MOCK_SUMMARY, total_estimated: '$667' });
-      return NextResponse.json({ runId, products: MOCK_PRODUCTS, summary: MOCK_SUMMARY, total_estimated: '$667' });
+      return NextResponse.json(
+        buildSuccessResponse({
+          runId,
+          userRequest,
+          roomProfile,
+          products: MOCK_PRODUCTS,
+          reasoning: MOCK_REASONING,
+          summary: MOCK_SUMMARY,
+          total_estimated: MOCK_TOTAL,
+          source: 'mock',
+        }),
+      );
     }
 
     const run = await getSubconscious().run({
       engine: AGENT_ENGINE,
-      input: { instructions: `${WAYFAIR_AGENT_PROMPT}\n\n# User request\n\n${userRequest}`, tools: WAYFAIR_TOOLS },
+      input: {
+        instructions: `${WAYFAIR_AGENT_PROMPT}\n\n# Room profile\n\n${JSON.stringify(roomProfile, null, 2)}\n\n# User request\n\n${userRequest}`,
+        tools: WAYFAIR_TOOLS,
+      },
       options: { awaitCompletion: true },
     });
 
@@ -75,12 +194,46 @@ export async function POST(req: NextRequest) {
     const parsed = parseAnswer(raw);
 
     if (parsed) {
-      saveRun(runId, { products: parsed.products, reasoning, summary: parsed.summary, total_estimated: parsed.total_estimated });
-      return NextResponse.json({ runId, products: parsed.products, summary: parsed.summary, total_estimated: parsed.total_estimated });
+      return NextResponse.json(
+        buildSuccessResponse({
+          runId,
+          userRequest,
+          roomProfile,
+          products: parsed.products,
+          reasoning,
+          summary: parsed.summary,
+          total_estimated: parsed.total_estimated,
+          source: 'live',
+        }),
+      );
     }
-    saveRun(runId, { products: [], reasoning, summary: raw, total_estimated: 'N/A' });
-    return NextResponse.json({ runId, products: [], summary: raw, total_estimated: 'N/A', _raw: true });
+
+    return NextResponse.json(
+      buildSuccessResponse({
+        runId,
+        userRequest,
+        roomProfile,
+        products: MOCK_PRODUCTS,
+        reasoning: reasoning.length ? reasoning : MOCK_REASONING,
+        summary: raw || MOCK_SUMMARY,
+        total_estimated: MOCK_TOTAL,
+        source: 'fallback',
+      }),
+    );
   } catch (err) {
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'Unknown error' }, { status: 500 });
+    const message = err instanceof Error ? err.message : 'Unknown sponsor API error';
+
+    return NextResponse.json(
+      buildSuccessResponse({
+        runId,
+        userRequest: userRequest || 'fallback request',
+        roomProfile,
+        products: MOCK_PRODUCTS,
+        reasoning: MOCK_REASONING,
+        summary: `${MOCK_SUMMARY} Live API fallback: ${message}`,
+        total_estimated: MOCK_TOTAL,
+        source: 'fallback',
+      }),
+    );
   }
 }
