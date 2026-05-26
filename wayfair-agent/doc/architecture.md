@@ -1,174 +1,276 @@
-# Architecture — Wayfair AI Design Agent
+# Architecture — Move-in Discovery Agent
 
-> **目标（一句话）**：用户用自然语言描述空间需求 → Subconscious agent 在 Wayfair 上搜索 → 输出搭配方案 + 推理过程
-
----
-
-## 1. 系统架构图
-
-```
-┌───────────────────────────────────────────────────────────────┐
-│                       Next.js App                              │
-│                                                                │
-│  ┌──────────────────────┐         ┌────────────────────────┐  │
-│  │  /  (Page 1)         │         │  /reasoning/[runId]    │  │
-│  │  - 输入框            │  ──────▶│  - Agent 思考步骤      │  │
-│  │  - Example prompts   │  跳转   │  - Tool calls          │  │
-│  │  - 产品卡片网格      │         │  - 时间线视图          │  │
-│  └──────────┬───────────┘         └────────────────────────┘  │
-│             │                                                  │
-│             │ POST                                             │
-│             ▼                                                  │
-│  ┌──────────────────────┐                                     │
-│  │  /api/agent          │  Next.js Route Handler               │
-│  │  POST → run agent    │  Returns: products + reasoning + id │
-│  └──────────┬───────────┘                                     │
-└─────────────┼─────────────────────────────────────────────────┘
-              │
-              ▼
-   ┌──────────────────────┐
-   │  Subconscious SDK    │
-   │  engine: tim-gpt     │
-   │  tool: fast_search   │  ← Subconscious 内置 web 搜索
-   └──────────┬───────────┘
-              │
-              ▼
-        wayfair.com
-```
-
-**部署目标**：Cloudflare Pages（如果时间允许）
+> Goal: turn a messy move-in request into a coordinated Wayfair shopping plan with room understanding, budget reasoning, a simple 2D layout preview, and visible agent reasoning.
 
 ---
 
-## 2. 数据流（一条 happy path）
+## 1. Product Shape
 
+This is a consumer discovery agent for Wayfair shoppers.
+
+The user should not fill out filters. They describe their situation naturally:
+
+```text
+I just moved into my first studio apartment. It is small, and I need a bed, a place to work, and some storage. I like light wood and cozy neutrals, and I want to stay under $800.
 ```
-1. 用户在 / 页输入："Studio apartment, Scandinavian style, $800 budget"
-                                ▼
-2. ChatUI 组件 POST 到 /api/agent
-   Body: { userRequest: "..." }
-                                ▼
-3. /api/agent 调用 Subconscious:
-   - engine: "tim-gpt"
-   - instructions: [完整的 system prompt + 用户请求]
-   - tools: [{ type: "platform", id: "fast_search" }]
-   - options: { awaitCompletion: true }
-                                ▼
-4. Subconscious 自己跑 multi-hop:
-   - 解析用户意图
-   - 调用 fast_search 多次（搜床、搜桌、搜椅）
-   - 综合分析价格、风格、搭配
-                                ▼
-5. 返回 result:
-   - result.answer  → JSON 格式的产品列表
-   - result.reasoning → 结构化推理树（Page 2 用）
-                                ▼
-6. /api/agent 解析 + 存到内存 store（按 runId 索引）
-   返回给前端: { runId, products, summary, total }
-                                ▼
-7. Page 1 渲染产品卡片
-   "查看 AI 推理过程" 按钮 → 跳转到 /reasoning/[runId]
-                                ▼
-8. Page 2 GET /api/runs/[id]
-   渲染推理步骤的时间线
+
+The app returns:
+
+- parsed room profile
+- 3-5 Wayfair product recommendations
+- total budget summary
+- 2D top-down layout preview
+- reasoning trace showing how the agent made decisions
+
+---
+
+## 2. High-Level Architecture
+
+```text
+User
+ |
+ | free-form room request
+ v
+Next.js Homepage
+ |
+ | POST /api/agent
+ v
+Next.js Route Handler
+ |
+ |-------------------------------|
+ |                               |
+ v                               v
+Baseten                      Subconscious
+Room profile extraction      Wayfair discovery agent
+ |                               |
+ |                               v
+ |                         fast_search tool
+ |                               |
+ |                               v
+ |                         wayfair.com results
+ |                               |
+ |-------------------------------|
+ v
+Combined response
+ |
+ v
+Frontend UI
+- Room Profile
+- Product Cards
+- Budget Bar
+- 2D Layout Preview
+- Reasoning Panel
 ```
 
 ---
 
-## 3. 文件结构
+## 3. Current Project Mapping
 
+Current files already present:
+
+```text
+src/app/page.tsx                  # currently default Next.js page; replace with MVP UI
+src/app/api/agent/route.ts        # already calls Subconscious; extend response shape
+src/lib/subconscious.ts           # Subconscious client and fast_search tool config
+src/lib/prompts.ts                # agent prompts; update for new MVP
+src/lib/store.ts                  # in-memory run store
+src/lib/types.ts                  # shared TypeScript types; extend for room/layout
+src/components/ui/*               # shadcn/base UI components
 ```
-wayfair-agent/
-├── src/
-│   ├── app/
-│   │   ├── layout.tsx                 # 全局 layout
-│   │   ├── page.tsx                   # Page 1: 主输入页
-│   │   ├── reasoning/
-│   │   │   └── [runId]/
-│   │   │       └── page.tsx           # Page 2: 推理展示
-│   │   ├── api/
-│   │   │   ├── agent/
-│   │   │   │   └── route.ts           # POST: 跑 agent
-│   │   │   └── runs/
-│   │   │       └── [id]/
-│   │   │           └── route.ts       # GET: 获取历史 run
-│   │   └── globals.css
-│   │
-│   ├── components/
-│   │   ├── ChatInput.tsx              # Page 1 输入区
-│   │   ├── ProductGrid.tsx            # Page 1 结果展示
-│   │   ├── ReasoningTimeline.tsx      # Page 2 推理时间线
-│   │   └── ui/                        # shadcn 组件
-│   │
-│   └── lib/
-│       ├── subconscious.ts            # Subconscious client 封装
-│       ├── store.ts                   # 内存 store（按 runId 存 run）
-│       └── types.ts                   # TypeScript types
-│
-├── .env.local                         # SUBCONSCIOUS_API_KEY
-├── next.config.js
-└── package.json
+
+Recommended new files:
+
+```text
+src/lib/baseten.ts                # Baseten room profile extraction with fallback
+src/lib/layout.ts                 # deterministic 2D layout generation from products
+src/components/RoomProfileCard.tsx
+src/components/ProductGrid.tsx
+src/components/BudgetBar.tsx
+src/components/LayoutPreview.tsx
+src/components/ReasoningPanel.tsx
+```
+
+Optional, only if time remains:
+
+```text
+src/app/api/runs/[id]/route.ts    # GET stored run by id
+```
+
+Do not build a separate reasoning page for MVP. Show reasoning on the homepage.
+
+---
+
+## 4. Technology Choices
+
+| Layer | Choice | Reason |
+|---|---|---|
+| Frontend | Next.js App Router | Existing project, fast full-stack demo |
+| UI | Tailwind + existing UI components | Already installed, low setup cost |
+| Room understanding | Baseten Model API | Extracts structured room profile from natural language |
+| Product discovery | Subconscious | Agent runtime with tool use and reasoning trace |
+| Search | Subconscious `fast_search` | Finds Wayfair products without custom browser automation |
+| State | In-memory Map | Good enough for a live hackathon demo |
+| Layout preview | CSS top-down plan | Reliable and fast; avoids weak photorealistic rendering |
+
+---
+
+## 5. Data Flow
+
+### Step 1 — User Input
+
+The homepage contains one free-form text area and 2-3 example prompts.
+
+No dropdowns. No required filters.
+
+### Step 2 — `POST /api/agent`
+
+Request:
+
+```ts
+{
+  userRequest: string;
+}
+```
+
+### Step 3 — Baseten Room Profile
+
+The backend calls Baseten to convert the free-form request into a room profile.
+
+Target output:
+
+```ts
+type RoomProfile = {
+  room_type: string;
+  dimensions: {
+    label: string;
+    width_ft?: number;
+    length_ft?: number;
+    source: "user" | "assumed";
+  };
+  style: string[];
+  budget?: number;
+  needs: string[];
+  constraints: string[];
+};
+```
+
+Example:
+
+```json
+{
+  "room_type": "studio apartment",
+  "dimensions": {
+    "label": "assumed 12 ft x 15 ft",
+    "width_ft": 12,
+    "length_ft": 15,
+    "source": "assumed"
+  },
+  "style": ["Scandinavian", "light wood", "cozy neutrals"],
+  "budget": 800,
+  "needs": ["bed", "desk", "storage", "chair"],
+  "constraints": ["small space", "work from home"]
+}
+```
+
+If Baseten fails, use a local fallback profile so the demo never blocks.
+
+### Step 4 — Subconscious Product Discovery
+
+The backend sends both the original user request and the room profile to Subconscious.
+
+Subconscious should:
+
+- identify the best shopping categories
+- search Wayfair through `fast_search`
+- select a coherent product set
+- keep the total near or under budget
+- return strict JSON
+- provide reasoning through `run.result.reasoning`
+
+Target product answer:
+
+```ts
+type AgentAnswer = {
+  products: Product[];
+  summary: string;
+  total_estimated: string;
+};
+```
+
+### Step 5 — Layout Generation
+
+The app generates a deterministic 2D layout from product categories.
+
+This is intentionally not a render. It is a planning preview.
+
+Example category positions:
+
+```ts
+const layoutMap = {
+  bed: { left: "8%", top: "10%", width: "38%", height: "24%" },
+  desk: { left: "10%", top: "68%", width: "28%", height: "14%" },
+  chair: { left: "68%", top: "64%", width: "18%", height: "18%" },
+  storage: { left: "72%", top: "14%", width: "16%", height: "32%" },
+  rug: { left: "30%", top: "42%", width: "40%", height: "22%" },
+  table: { left: "44%", top: "68%", width: "20%", height: "14%" }
+};
+```
+
+Product category can be inferred from product name and need:
+
+```text
+bed, mattress, platform -> bed
+desk, writing table -> desk
+chair, armchair -> chair
+shelf, cabinet, storage -> storage
+rug -> rug
+lamp -> lamp
+table, nightstand -> table
+```
+
+### Step 6 — Combined Response
+
+`POST /api/agent` should return:
+
+```ts
+{
+  runId: string;
+  roomProfile: RoomProfile;
+  products: Product[];
+  summary: string;
+  total_estimated: string;
+  reasoning: ReasoningNode[];
+  layout: LayoutItem[];
+}
 ```
 
 ---
 
-## 4. API 接口定义
+## 6. Core Types
 
-### `POST /api/agent`
-
-**Request:**
-```typescript
-{
-  userRequest: string  // 用户自然语言输入
-}
-```
-
-**Response (success):**
-```typescript
-{
-  runId: string,           // 用来跳转到 Page 2
-  products: Product[],     // 推荐的产品列表
-  summary: string,         // 整体设计说明
-  total_estimated: string  // "$745"
-}
-```
-
-**Response (error):**
-```typescript
-{
-  error: string
-}
-```
-
-### `GET /api/runs/[id]`
-
-**Response:**
-```typescript
-{
-  runId: string,
-  userRequest: string,
-  products: Product[],
-  reasoning: ReasoningNode[],   // Subconscious 返回的推理树
-  summary: string,
-  total_estimated: string,
-  createdAt: string
-}
-```
-
-### 共享类型
-
-```typescript
+```ts
 type Product = {
   name: string;
-  price: string;          // "$129"
-  why_it_fits: string;    // AI 给出的推荐理由
+  price: string;
+  why_it_fits: string;
   image_url?: string;
   product_url?: string;
 };
 
+type LayoutItem = {
+  id: string;
+  label: string;
+  category: string;
+  price?: string;
+  left: string;
+  top: string;
+  width: string;
+  height: string;
+};
+
 type ReasoningNode = {
   step: number;
-  type: 'thought' | 'tool_call' | 'observation';
+  type: "thought" | "tool_call" | "observation";
   content: string;
   tool?: string;
   duration_ms?: number;
@@ -177,68 +279,92 @@ type ReasoningNode = {
 
 ---
 
-## 5. 关键技术决策
+## 7. Frontend MVP
 
-| 决策 | 选择 | 理由 |
-|------|------|------|
-| Agent 框架 | Subconscious SDK (Node) | 赞助商主推 + 不需要自己写 tool loop |
-| Web 浏览 | Subconscious 内置 fast_search | 比 Browser Use 简单 10 倍，避免 Python/Node 混栈 |
-| 前端框架 | Next.js 15 App Router | 全栈一体化，部署简单 |
-| UI 库 | shadcn/ui + Tailwind | 现成漂亮组件，零自定义 CSS |
-| 状态管理 | 无（URL + 内存 Map） | 2 小时不引入 Redux/Zustand |
-| 部署 | Cloudflare Pages | 加分项，Next.js 兼容 |
-| 数据持久化 | 内存 Map（重启丢失） | 够 demo 用，不引入数据库 |
+Homepage sections, in order:
 
----
+1. Hero/input area
+   - project name: Move-in Discovery Agent
+   - one text area
+   - example prompt chips
+   - submit button
 
-## 6. Cut Points（关键！）
+2. Result summary
+   - room profile card
+   - budget bar
 
-按时间检查点决定砍什么：
+3. Product plan
+   - product cards with image, name, price, reason, Wayfair link
 
-### 🟢 MVP（必须完成，19:00 前）
-- Page 1 完整：输入框 + Example badge + 产品卡片网格
-- `/api/agent` 跑通：能调 Subconscious 返回结构化产品
-- localhost 能 demo 一个完整 happy path
-- **如果 19:00 这些没完成 → 项目失败，专心修主流程**
+4. Spatial fit preview
+   - 2D room rectangle
+   - positioned furniture blocks
+   - room dimension label
 
-### 🟡 Stretch 1: Page 2 推理展示
-- 19:00 检查点：MVP 完成了吗？
-  - 是 → 继续做 Page 2
-  - 否 → 跳过，从主页直接展示 reasoning JSON（不做单独页面）
-
-### 🟡 Stretch 2: Cloudflare 部署
-- 19:20 检查点：还有时间吗？
-  - 是 → `wrangler deploy` 尝试
-  - 卡住 5 分钟没好 → 回 localhost demo（不要硬刚）
-  - **Demo 用本地版本完全 OK**，可以口头说"部署目标是 Cloudflare"
-
-### 🔴 Demo 救命兜底
-- 19:30 必须有截图 / 屏幕录制存档
-- 现场跑失败 → 直接放录像
-- 主办方不会扣分
+5. Reasoning panel
+   - show flattened Subconscious reasoning steps
+   - use short labels: Thought, Search, Observation
 
 ---
 
-## 7. 风险点 + 应对
+## 8. Fallback Strategy
 
-| 风险 | 概率 | 应对 |
-|------|------|------|
-| Subconscious 返回不是 JSON | 中 | `route.ts` 里 try/catch JSON.parse，失败就 raw 展示 |
-| fast_search 找不到 Wayfair 产品 | 中 | prompt 里明确要求 "wayfair.com" 关键词 |
-| Subconscious API 完全挂掉 | 低 | 备用：Anthropic SDK 直接调，但不要现场切换 |
-| Cloudflare 部署失败 | 高 | 回 localhost demo |
-| 产品 image_url 是死链 | 中 | `<img onError>` fallback 到 placeholder |
+The demo must work even if sponsor APIs fail.
+
+Fallback order:
+
+1. If Baseten fails:
+   - use default room profile based on the happy-path prompt.
+
+2. If Subconscious fails:
+   - use mock products and mock reasoning.
+
+3. If Subconscious returns non-JSON:
+   - show raw summary and no products, but do not crash.
+
+4. If product images fail:
+   - show a neutral placeholder.
+
+Set `USE_MOCK=true` for emergency demo mode.
 
 ---
 
-## 8. 演示故事（决定 25% 评分）
+## 9. MVP Cut Points
 
-**核心 narrative**：
-> "国际学生第一次来美国布置房间——几十万件商品，自己搭配太难。
->  我们做了一个 AI 装修顾问。你描述空间和风格，Agent 自动浏览 Wayfair、选品、搭配、给方案。
->  而且——你能看到 Agent 是怎么思考的（点 reasoning 页面），这是 Subconscious 的 TIM 模型独有的能力。"
+Must-have:
 
-**Showmanship 加分**：
-- Page 2 推理展示 = 让评委看到"agent 真的在思考"
-- Cloudflare 部署 = "可以全球 edge 部署"
-- 真实 Wayfair 链接 = 评委可以点开验证不是假的
+- free-form input
+- mock-backed product cards
+- room profile card
+- budget bar
+- 2D layout preview
+- reasoning panel on homepage
+
+Nice-to-have:
+
+- real Baseten room profile extraction
+- real Wayfair product links/images
+- `GET /api/runs/[id]`
+- polished loading skeletons
+
+Cut if time runs out:
+
+- photorealistic rendering
+- floor plan editor
+- separate reasoning page
+- Cloudflare deployment
+- checkout recovery
+
+---
+
+## 10. Demo Happy Path
+
+Use this exact prompt for the live demo:
+
+```text
+I just moved into my first studio apartment. It is small, and I need a bed, a place to work, and some storage. I like light wood and cozy neutrals, and I want to stay under $800.
+```
+
+Demo narrative:
+
+> Wayfair has millions of products, but new movers do not want to filter forever. Our agent turns a messy move-in request into a coordinated room plan. Baseten extracts the room profile, Subconscious searches Wayfair and reasons over product choices, and the UI shows products, budget, and a spatial fit preview.
