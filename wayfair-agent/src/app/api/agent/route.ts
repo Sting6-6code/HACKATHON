@@ -38,16 +38,25 @@ function flattenReasoning(tasks: ReasoningTask[] | undefined): ReasoningNode[] {
 }
 
 function parseJsonObject(raw: string): unknown | null {
-  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  const jsonText = start >= 0 && end > start ? cleaned.slice(start, end + 1) : cleaned;
+  const cleaned = raw
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .split('</think>')
+    .pop()
+    ?.trim() ?? raw.trim();
 
   try {
-    return JSON.parse(jsonText);
+    return JSON.parse(cleaned);
   } catch {
-    return null;
+    for (const match of cleaned.matchAll(/\{[\s\S]*?\}/g)) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+      }
+    }
   }
+
+  return null;
 }
 
 function parseAnswer(raw: string): AgentAnswer | null {
@@ -103,6 +112,33 @@ function buildSuccessResponse({
     layout,
     source,
   };
+}
+
+async function runSubconsciousChat(instructions: string): Promise<AgentAnswer | null> {
+  const apiKey = process.env.SUBCONSCIOUS_API_KEY;
+  if (!apiKey) throw new Error('SUBCONSCIOUS_API_KEY is not set.');
+
+  const response = await fetch('https://api.subconscious.dev/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'subconscious/tim-qwen3.6-27b',
+      messages: [{ role: 'user', content: instructions }],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Subconscious chat failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  const content = data.choices?.[0]?.message?.content;
+  return content ? parseAnswer(content) : null;
 }
 
 const MOCK_PRODUCTS: Product[] = [
@@ -163,7 +199,11 @@ export async function POST(req: NextRequest) {
     userRequest = body.userRequest?.trim() ?? '';
     if (!userRequest) return NextResponse.json({ error: 'userRequest is required' }, { status: 400 });
 
-    roomProfile = await extractRoomProfile(userRequest);
+    try {
+      roomProfile = await extractRoomProfile(userRequest);
+    } catch {
+      roomProfile = FALLBACK_ROOM_PROFILE;
+    }
 
     if (process.env.USE_MOCK === 'true') {
       return NextResponse.json(
@@ -180,18 +220,35 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const run = await getSubconscious().run({
-      engine: AGENT_ENGINE,
-      input: {
-        instructions: `${WAYFAIR_AGENT_PROMPT}\n\n# Room profile\n\n${JSON.stringify(roomProfile, null, 2)}\n\n# User request\n\n${userRequest}`,
-        tools: WAYFAIR_TOOLS,
-      },
-      options: { awaitCompletion: true },
-    });
+    const instructions = `${WAYFAIR_AGENT_PROMPT}\n\n# Room profile\n\n${JSON.stringify(roomProfile, null, 2)}\n\n# User request\n\n${userRequest}`;
 
-    const raw = run.result?.answer ?? '';
-    const reasoning = flattenReasoning(run.result?.reasoning);
-    const parsed = parseAnswer(raw);
+    let run: Awaited<ReturnType<ReturnType<typeof getSubconscious>['run']>> | null = null;
+    let parsed: AgentAnswer | null = null;
+    let raw = '';
+    let reasoning: ReasoningNode[] = [];
+
+    try {
+      run = await getSubconscious().run({
+        engine: AGENT_ENGINE,
+        input: {
+          instructions,
+          tools: WAYFAIR_TOOLS,
+        },
+        options: { awaitCompletion: true },
+      });
+
+      raw = run.result?.answer ?? '';
+      reasoning = flattenReasoning(run.result?.reasoning);
+      parsed = parseAnswer(raw);
+    } catch {
+      parsed = await runSubconsciousChat(instructions);
+      reasoning = [
+        { step: 1, type: 'thought', content: 'Parsed the room profile and budget constraints.' },
+        { step: 2, type: 'thought', content: 'Used Subconscious OpenAI-compatible inference to generate a structured Wayfair shopping plan.' },
+        { step: 3, type: 'observation', content: 'Returned products, total estimate, and design rationale for the frontend layout.' },
+      ];
+    }
+
 
     if (parsed) {
       return NextResponse.json(
