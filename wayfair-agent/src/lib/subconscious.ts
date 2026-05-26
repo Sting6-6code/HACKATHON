@@ -14,7 +14,7 @@ export function getSubconscious(): Subconscious {
   return cached;
 }
 
-export const AGENT_ENGINE = 'tim-gpt';
+export const AGENT_ENGINE = 'tim';
 
 export const WAYFAIR_TOOLS = [
   { type: 'platform' as const, id: 'fast_search' },

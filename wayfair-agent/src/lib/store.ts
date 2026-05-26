@@ -1,7 +1,6 @@
 import type { RunRecord } from './types';
 
 declare global {
-  // eslint-disable-next-line no-var
   var __wayfairRunStore: Map<string, RunRecord> | undefined;
 }
 
